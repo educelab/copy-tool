@@ -48,6 +48,9 @@ def rclone(args: List[str], listener=default_listener):
     if rclone_exe is None:
         raise FileNotFoundError('rclone executable not found')
 
+    if sys.platform == 'win32':
+        rclone_exe = 'rclone'
+
     args.insert(0, rclone_exe)
 
     with sp.Popen(args, stdout=sp.PIPE) as proc:
