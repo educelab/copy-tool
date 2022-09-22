@@ -12,7 +12,7 @@ from typing import Dict, Tuple
 import bitmath
 from PySide6.QtCore import (QCoreApplication, QObject, QSettings,
                             QStandardPaths, QThread, Qt, Signal)
-from PySide6.QtGui import QCloseEvent
+from PySide6.QtGui import QCloseEvent, QIcon
 from PySide6.QtWidgets import (QApplication, QFileDialog, QGroupBox,
                                QHBoxLayout, QLabel, QLineEdit, QMainWindow,
                                QMessageBox, QProgressBar, QPushButton,
@@ -80,6 +80,25 @@ def get_dir_size(d: Path) -> Tuple[int, int]:
             cnt += 1
             size += p.stat().st_size
     return size, cnt
+
+
+def app_icon_path():
+    if hasattr(sys, '_MEIPASS'):
+        d = ''
+    else:
+        d = 'assets'
+
+    if sys.platform == 'win32':
+        d = f'{d}\\' if len(d) else f'{str(Path(sys._MEIPASS).resolve())}\\'
+        f = 'icon.ico'
+    elif sys.platform == 'darwin':
+        d = f'{d}/' if len(d) else '../Resources/'
+        f = 'icon.icns'
+    else:
+        d = f'{d}/' if len(d) else ''
+        f = 'icon-round.png'
+    return f'{d}{f}'
+
 
 
 class RcloneController(QObject):
@@ -354,8 +373,12 @@ def main():
         f'{QCoreApplication.applicationName()} '
         f'v{QCoreApplication.applicationVersion()}')
 
+    app_icon = QIcon(app_icon_path())
+    app.setWindowIcon(app_icon)
+
     main_window = MainWindow()
     main_window.setWindowTitle('CopyTool')
+    main_window.setWindowIcon(app_icon)
     main_window.show()
     sys.exit(app.exec())
 
