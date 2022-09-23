@@ -5,7 +5,7 @@ block_cipher = None
 
 
 a = Analysis(
-    ['copy_tool.py'],
+    ['main.py'],
     pathex=[],
     binaries=[(which('rclone'), '.')],
     datas=[],
