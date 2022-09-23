@@ -2,6 +2,7 @@ import datetime as dt
 import logging
 import math
 import os
+import subprocess
 import sys
 import time
 from functools import partialmethod
@@ -13,7 +14,7 @@ import bitmath
 from PySide6.QtCore import (QCoreApplication, QObject, QSettings,
                             QStandardPaths, QThread, Qt, Signal)
 from PySide6.QtGui import QCloseEvent, QIcon
-from PySide6.QtWidgets import (QApplication, QFileDialog, QGroupBox,
+from PySide6.QtWidgets import (QApplication, QCheckBox, QFileDialog, QGroupBox,
                                QHBoxLayout, QLabel, QLineEdit, QMainWindow,
                                QMessageBox, QProgressBar, QPushButton,
                                QTextEdit, QVBoxLayout, QWidget)
@@ -73,6 +74,7 @@ def setup_logging(log_level=logging.INFO):
 
 
 def get_dir_size(d: Path) -> Tuple[int, int]:
+    """Recursively get the size and number of files in a directory."""
     cnt = 0
     size = 0
     for p in d.rglob('*'):
@@ -83,10 +85,13 @@ def get_dir_size(d: Path) -> Tuple[int, int]:
 
 
 def app_icon_path():
+    """Return the path to the app icon if app is bundled or running from the
+    source code directory.
+    """
     if hasattr(sys, '_MEIPASS'):
         d = ''
     else:
-        d = 'assets'
+        d = str(Path(__file__).resolve().parent / 'assets')
 
     if sys.platform == 'win32':
         d = f'{d}\\' if len(d) else f'{str(Path(sys._MEIPASS).resolve())}\\'
@@ -100,8 +105,8 @@ def app_icon_path():
     return f'{d}{f}'
 
 
-
 class RcloneController(QObject):
+    """Controller for managing a rclone subprocess in its own thread."""
     copy_complete = Signal(str)
     copy_failed = Signal(str)
 
@@ -157,7 +162,6 @@ class MainWindow(QMainWindow):
 
         if not rclone.is_installed():
             self._logger.error('rclone not detected')
-            self._logger.info(QApplication.applicationDirPath())
             error_box = QMessageBox()
             error_box.setWindowTitle('CopyTool')
             error_box.setIcon(QMessageBox.Critical)
@@ -221,6 +225,13 @@ class MainWindow(QMainWindow):
         select_tgt_dir = QPushButton('...')
         select_tgt_dir.clicked.connect(self._on_select_tgt)
         dir_widgets.layout().addWidget(select_tgt_dir)
+
+        self._shutdown_opt = QCheckBox('Shutdown when complete')
+        self._shutdown_opt.setChecked(False)
+        # Shutdown requires elevated privileges on Unix-like systems,
+        # So only add option on Windows for now
+        if sys.platform == 'win32':
+            rhs.layout().addWidget(self._shutdown_opt)
 
         self._copy_btn = QPushButton('Copy')
         self._copy_btn.clicked.connect(self._on_copy_start)
@@ -331,6 +342,8 @@ class MainWindow(QMainWindow):
     def _on_copy_complete(self, duration: str):
         self._columns_widget.setEnabled(True)
         self.console_complete(f'Copy complete (Elapsed: {duration})')
+        if self._shutdown_opt.isChecked():
+            self._on_request_shutdown()
 
     def _on_copy_failed(self, msg: str):
         self._columns_widget.setEnabled(True)
@@ -340,6 +353,16 @@ class MainWindow(QMainWindow):
         self._progress.setMaximum(total)
         self._progress.setValue(sent)
         self._eta_label.setText(f'eta: {eta}')
+
+    def _on_request_shutdown(self):
+        logger = logging.getLogger('CopyTool')
+        if sys.platform == 'win32':
+            logger.info('Requesting system shutdown')
+            cmd = 'shutdown /s /t 30 /d p:0:0 /c "CopyTool transfer completed."'
+            subprocess.run(cmd)
+            QCoreApplication.quit()
+        else:
+            logger.warning('Shutdown requests not support on this platform')
 
     def console_info(self, m: str):
         self._logger.info(m)

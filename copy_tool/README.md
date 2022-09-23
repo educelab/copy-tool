@@ -19,7 +19,7 @@ A GUI for copying data across filesystems using **rclone**.
 
 4. Run the application
    ```shell
-   python copy_tool/copy_tool.py
+   python copy_tool/main.py
    ```
    
 ## Building a deployable app package
@@ -32,6 +32,5 @@ A GUI for copying data across filesystems using **rclone**.
    pyinstaller copy_tool/copy_tool_macOS.spec
    
    # Windows
-   cd copy_tool\
    pyinstaller copy_tool\copy_tool_Windows.spec
    ```
