@@ -6,31 +6,52 @@ from pathlib import Path
 from shutil import which
 from typing import Callable, Dict, List, Union
 
-"""Regex to parses the rclone one-line progress report"""
-_REGEX_PROG_ONE_LINE = re.compile(
+"""Regex to match/parse an rclone log message"""
+_REGEX_RCLONE_LOG_MSG = re.compile(
+    R'(?P<date>\d{4}/\d{2}/\d{2}) (?P<time>\d{2}:\d{2}:\d{2}) '
+    R'(?P<loglevel>DEBUG|INFO|NOTICE|ERROR)\s*:\s*'
+    R'(?P<message>\w.*)'
+)
+
+"""Regex to match/parse the rclone one-line progress report"""
+_REGEX_RCLONE_LOG_PROG = re.compile(
     R'(?P<sent>\d+\.?\d*) (?P<sent_unit>[A-Za-z]+) / (?P<total>\d+\.?\d*) '
-    R'(?P<total_unit>[A-Za-z]+), (?P<percent>\d+)%, (?P<rate>\d+\.?\d*) '
-    R'(?P<rate_unit>[A-Za-z]+/[A-Za-z]+), ETA (?P<eta>.*?) '
-    R'\(xfr#(?P<files>\d+)/(?P<files_total>\d+)')
+    R'(?P<total_unit>[A-Za-z]+), (?P<percent>\d+|-)%?, (?P<rate>\d+\.?\d*) '
+    R'(?P<rate_unit>[A-Za-z]+/[A-Za-z]+), ETA (?P<eta>.*?)'
+    R'( \(xfr#(?P<files>\d+)/(?P<files_total>\d+)\))?')
 
 
-def default_progress_listener(d: Dict):
-    """Default progress report listener function. Prints the progress report to
-    stdout using print().
+def _parse_rclone_log_message(line: str) -> Union[Dict, None]:
+    """Parse rclone log message and return as a dict."""
+    # Match the log message
+    match = _REGEX_RCLONE_LOG_MSG.match(line)
+    if not match:
+        return None
+    # Default type is just a message
+    parsed = match.groupdict()
+    parsed['type'] = 'MESSAGE'
+
+    # If loglevel is NOTICE, so if it's a progress report
+    if parsed['loglevel'] == 'NOTICE':
+        match = _REGEX_RCLONE_LOG_PROG.match(parsed['message'])
+        if match:
+            parsed['type'] = 'PROGRESS'
+            parsed.update(match.groupdict())
+    return parsed
+
+
+def default_log_listener(d: Dict):
+    """Default rclone log listener function. Prints the log message to stdout
+    using print().
 
     :param d: Parsed progress report dict
     :return: None
     """
-    sent = f'{d["sent"]} {d["sent_unit"]} / {d["total"]} {d["total_unit"]}'
-    percent = f'{d["percent"]}%'
-    rate = f'{d["rate"]} {d["rate_unit"]}'
-    eta = f'ETA {d["eta"]}'
-    xfr = f'({d["files"]}/{d["files_total"]})'
-    print(f'{sent}, {percent}, {rate}, {eta} {xfr}')
+    print(f'{d["date"]} {d["time"]} {d["loglevel"]}: {d["message"]}')
 
 
-def null_progress_listener(d: Dict):
-    """No-op progress report listener function."""
+def null_log_listener(d: Dict):
+    """No-op rclone log listener function."""
     pass
 
 
@@ -53,34 +74,37 @@ def is_installed() -> bool:
 
 
 def copy(src: str, dest: str,
-         listener: Callable[[Dict], None] = default_progress_listener):
+         listener: Callable[[Dict], None] = default_log_listener) -> int:
     """Run the rclone copy command.
 
     :param src: Source file or directory
     :param dest: Destination directory
     :param listener: Callable for handling progress updates
-    :return: None
+    :return: process return code
     """
     args = ['copy', src, dest]
-    rclone(args=args, listener=listener)
+    return rclone(args=args, listener=listener)
 
 
 def rclone(args: List[str],
-           listener: Callable[[Dict], None] = default_progress_listener):
+           listener: Callable[[Dict], None] = default_log_listener) -> int:
     """Run rclone with the given list of arguments. Note that default arguments
     for reporting progress are always prepended to args:
 
-    rclone -P --stats-one-line [args...]
+    rclone --stats 500ms --stats-log-level NOTICE --stats-one-line [args...]
 
     :param args: List of program arguments
     :param listener: Callable for handling progress updates
-    :return: None
+    :return: process return code
     """
     # Add the rclone executable as the first argument
     rclone_exe = executable_path()
     if rclone_exe is None:
         raise FileNotFoundError('rclone executable not found')
-    args[0:0] = [rclone_exe, '-P', '--stats-one-line']
+    args[0:0] = [rclone_exe,
+                 '--stats', '500ms',
+                 '--stats-log-level', 'NOTICE',
+                 '--stats-one-line']
 
     # (Windows) For some reason, we have to explicitly disable the extra
     # subprocess window in a way we didn't before
@@ -91,35 +115,45 @@ def rclone(args: List[str],
         startupinfo.wShowWindow = sp.SW_HIDE
 
     # Run rclone
-    with sp.Popen(args=args, stdout=sp.PIPE, startupinfo=startupinfo) as proc:
+    return_code = None
+    with sp.Popen(args=args, stderr=sp.PIPE, startupinfo=startupinfo) as proc:
         def read_buffer(buffer):
-            b = proc.stdout.read(2).decode()
+            """Read from stderr two bytes at time and handle new lines"""
+            b = proc.stderr.read(2).decode()
             if b is not None:
                 buffer = f'{buffer}{b}'
             new_line = None
             if '\n' in buffer:
                 new_line, buffer = buffer.split(sep='\n')
-            elif ')' in buffer:
-                new_line, buffer = buffer.split(sep=')')
             if new_line is not None:
-                parsed = _parse_one_line_progress(new_line)
+                parsed = _parse_rclone_log_message(new_line)
                 if parsed is not None:
                     listener(parsed)
             return buffer
 
-        stdout_buffer = ''
-        while proc.poll() is None:
-            stdout_buffer = read_buffer(stdout_buffer)
+        def flush_buffer(buffer):
+            """Read all remaining bytes from buffer and parse all new lines"""
+            b = proc.stderr.read().decode()
+            if b is not None:
+                buffer = f'{buffer}{b}'
+            new_lines = None
+            if '\n' in buffer:
+                new_lines, buffer = buffer.split(sep='\n')
+            if new_lines is None:
+                return
+            for n in new_lines:
+                parsed = _parse_rclone_log_message(n)
+                if parsed is not None:
+                    listener(parsed)
 
-    return proc
+        # Read and parse stderr until the process ends
+        stderr_buffer = ''
+        while return_code is None:
+            stderr_buffer = read_buffer(stderr_buffer)
+            return_code = proc.poll()
+        flush_buffer(stderr_buffer)
 
-
-def _parse_one_line_progress(line: str) -> Union[Dict, None]:
-    """Parse one-line progress and return as a dict."""
-    match = _REGEX_PROG_ONE_LINE.match(line)
-    if match:
-        return match.groupdict()
-    return None
+    return return_code
 
 
 def main():
