@@ -1,7 +1,6 @@
 import datetime as dt
 import logging
 import math
-import os
 import subprocess
 import sys
 import time
@@ -14,12 +13,12 @@ import bitmath
 from PySide6.QtCore import (QCoreApplication, QObject, QSettings,
                             QStandardPaths, QThread, Qt, Signal)
 from PySide6.QtGui import QCloseEvent, QIcon
-from PySide6.QtWidgets import (QApplication, QCheckBox, QFileDialog, QGroupBox,
-                               QHBoxLayout, QLabel, QLineEdit, QMainWindow,
-                               QMessageBox, QProgressBar, QPushButton,
-                               QTextEdit, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QCheckBox, QHBoxLayout,
+                               QMainWindow, QMessageBox, QPushButton, QTextEdit,
+                               QVBoxLayout, QWidget)
 
 import rclone
+import widgets
 
 
 class ApplicationLogFilter(logging.Filter):
@@ -99,6 +98,9 @@ def app_icon_path():
     elif sys.platform == 'darwin':
         d = f'{d}/' if len(d) else '../Resources/'
         f = 'icon.icns'
+    elif sys.platform == 'linux':
+        d = f'{d}/' if len(d) else f'{str(Path(sys._MEIPASS).resolve())}/'
+        f = 'icon-linux.ico'
     else:
         d = f'{d}/' if len(d) else ''
         f = 'icon-round.png'
@@ -121,37 +123,49 @@ class RcloneController(QObject):
     def on_submit_copy(self, src: str, dest: str):
         logger = logging.getLogger('CopyTool')
         self.message_info.emit(f'Copying: \'{src}\' -> \'{dest}\'')
+
         start = dt.datetime.now(tz=dt.timezone.utc)
         try:
-            rclone.copy(src, dest, listener=self._on_status_update)
+            ret = rclone.copy(src, dest, listener=self._on_status_update)
         except FileNotFoundError as e:
             logger.error(e)
             self.copy_failed.emit(f'Copy failed. rclone failed to launch.')
             return
-        duration = dt.datetime.now(tz=dt.timezone.utc) - start
-        self.copy_complete.emit(str(duration))
+        if ret != 0:
+            self.copy_failed.emit(f'Copy failed with return code {ret}')
+        else:
+            duration = dt.datetime.now(tz=dt.timezone.utc) - start
+            self.copy_complete.emit(str(duration))
 
     def on_status_update(self, status: Dict):
-        sent = bitmath.parse_string(f'{status["sent"]} {status["sent_unit"]}')
-        total = bitmath.parse_string(
-            f'{status["total"]} {status["total_unit"]}')
-        sent = int(math.floor(sent.to_Kib().value))
-        total = int(math.floor(total.to_Kib().value))
-        eta = f'{status["eta"]}, {status["rate"]} {status["rate_unit"]}'
-        self.progress_update.emit(total, sent, eta)
+        logger = logging.getLogger('CopyTool')
+        if status['type'] == 'PROGRESS':
+            sent = bitmath.parse_string(
+                f'{status["sent"]} {status["sent_unit"]}')
+            total = bitmath.parse_string(
+                f'{status["total"]} {status["total_unit"]}')
+            sent = int(math.floor(sent.to_Kib().value))
+            total = int(math.floor(total.to_Kib().value))
+            eta = f'{status["eta"]}, {status["rate"]} {status["rate_unit"]}'
+            self.progress_update.emit(total, sent, eta)
+        elif status['loglevel'] == 'DEBUG':
+            logger.debug(status['message'])
+        elif status['loglevel'] == 'INFO':
+            logger.info(status['message'])
+        elif status['loglevel'] == 'NOTICE':
+            logger.warning(status['message'])
+        elif status['loglevel'] == 'ERROR':
+            self.message_error.emit(status['message'])
 
     _on_status_update = partialmethod(on_status_update)
 
 
 class MainWindow(QMainWindow):
-    _src_dir = None
-    _src_label = None
-    _tgt_dir = None
-    _dir_picker = None
     _rclone = None
     _rclone_thread = None
     _start_time = None
     _logger = None
+    _connection = None
 
     submit_copy = Signal(str, str)
 
@@ -179,80 +193,32 @@ class MainWindow(QMainWindow):
         main_widget.setLayout(main_layout)
         self.setCentralWidget(main_widget)
 
-        # Two columns
-        self._columns_widget = QWidget()
-        columns_layout = QHBoxLayout()
-        self._columns_widget.setLayout(columns_layout)
-        columns_layout.setContentsMargins(0, 0, 0, 0)
-        main_layout.addWidget(self._columns_widget)
+        # Cards list
+        self._cards_widget = widgets.CardListWidget()
+        main_layout.addWidget(self._cards_widget, stretch=2)
 
-        # LHS
-        lhs = QGroupBox('Source')
-        lhs.setLayout(QVBoxLayout())
-        lhs.layout().setAlignment(Qt.AlignTop)
-        columns_layout.addWidget(lhs)
+        copy_ctrls = QWidget()
+        copy_ctrls.setLayout(QHBoxLayout())
+        copy_ctrls.layout().setContentsMargins(5, 0, 5, 0)
+        copy_ctrls.layout().setSpacing(5)
+        copy_ctrls.layout().setAlignment(Qt.AlignRight)
+        main_layout.addWidget(copy_ctrls)
 
-        dir_widgets = QWidget()
-        dir_widgets.setLayout(QHBoxLayout())
-        dir_widgets.layout().setContentsMargins(0, 0, 0, 0)
-        lhs.layout().addWidget(dir_widgets)
-        self._src_dir = QLineEdit()
-        self._src_dir.textChanged.connect(self._on_change_src_dir)
-        dir_widgets.layout().layout().addWidget(self._src_dir)
-
-        select_src_dir = QPushButton('...')
-        select_src_dir.clicked.connect(self._on_select_src)
-        dir_widgets.layout().layout().addWidget(select_src_dir)
-
-        self._src_label = QLabel()
-        self._src_label.setContentsMargins(0, 0, 0, 0)
-        lhs.layout().addWidget(self._src_label)
-
-        # RHS
-        rhs = QGroupBox('Target')
-        rhs.setLayout(QVBoxLayout())
-        rhs.layout().setAlignment(Qt.AlignTop)
-        columns_layout.addWidget(rhs)
-
-        dir_widgets = QWidget()
-        dir_widgets.setLayout(QHBoxLayout())
-        dir_widgets.layout().setContentsMargins(0, 0, 0, 0)
-        rhs.layout().addWidget(dir_widgets)
-
-        self._tgt_dir = QLineEdit()
-        dir_widgets.layout().addWidget(self._tgt_dir)
-
-        select_tgt_dir = QPushButton('...')
-        select_tgt_dir.clicked.connect(self._on_select_tgt)
-        dir_widgets.layout().addWidget(select_tgt_dir)
-
-        self._shutdown_opt = QCheckBox('Shutdown when complete')
+        self._shutdown_opt = QCheckBox('Shutdown on complete')
         self._shutdown_opt.setChecked(False)
         # Shutdown requires elevated privileges on Unix-like systems,
         # So only add option on Windows for now
         if sys.platform == 'win32':
-            rhs.layout().addWidget(self._shutdown_opt)
+            copy_ctrls.layout().addWidget(self._shutdown_opt)
+            copy_ctrls.layout().addSpacing(25)
 
-        self._copy_btn = QPushButton('Copy')
-        self._copy_btn.clicked.connect(self._on_copy_start)
-        rhs.layout().addWidget(self._copy_btn)
-
-        self._dir_picker = QFileDialog()
-        self._dir_picker.setFileMode(QFileDialog.Directory)
-
-        # Progress bar
-        prog_widget = QWidget()
-        prog_widget.setLayout(QHBoxLayout())
-        prog_widget.layout().setContentsMargins(0, 0, 0, 0)
-        main_layout.addWidget(prog_widget)
-        self._progress = QProgressBar()
-        self._progress.setRange(0, 0)
-        prog_widget.layout().addWidget(self._progress)
-        self._eta_label = QLabel(text='eta: -')
-        prog_widget.layout().addWidget(self._eta_label)
+        self._copy_btn = QPushButton('Start')
+        self._copy_btn.clicked.connect(self._on_queue_start)
+        copy_ctrls.layout().addWidget(self._copy_btn, stretch=1)
 
         self._console = QTextEdit()
         self._console.setReadOnly(True)
+        self._console.setMinimumHeight(100)
         app_str = f'{QApplication.organizationName()} ' \
                   f'{QApplication.applicationName()} ' \
                   f'v{QApplication.applicationVersion()}'
@@ -265,7 +231,6 @@ class MainWindow(QMainWindow):
         self.submit_copy.connect(self._rclone.on_submit_copy)
         self._rclone.copy_complete.connect(self._on_copy_complete)
         self._rclone.copy_failed.connect(self._on_copy_failed)
-        self._rclone.progress_update.connect(self._on_progress_update)
         self._rclone.message_info.connect(self.console_info)
         self._rclone.message_warning.connect(self.console_warning)
         self._rclone.message_error.connect(self.console_error)
@@ -288,8 +253,12 @@ class MainWindow(QMainWindow):
 
         settings.setValue("mainWin/geometry", self.saveGeometry())
         settings.setValue("mainWin/state", self.saveState())
-        settings.setValue('source', self._src_dir.text())
-        settings.setValue('target', self._tgt_dir.text())
+
+        settings.setValue('cards', self._cards_widget.card_list)
+        if settings.contains('source'):
+            settings.remove('source')
+        if settings.contains('target'):
+            settings.remove('target')
 
     def _load_settings(self):
         settings = QSettings()
@@ -297,62 +266,71 @@ class MainWindow(QMainWindow):
             self.restoreGeometry(settings.value("mainWin/geometry"))
         if settings.contains("mainWin/state"):
             self.restoreState(settings.value("mainWin/state"))
-        self._src_dir.setText(settings.value('source', ''))
-        self._tgt_dir.setText(settings.value('target', ''))
 
-    def _on_select_src(self):
-        self._dir_picker.setDirectory(self._src_dir.text())
-        if self._dir_picker.exec():
-            directory = self._dir_picker.selectedFiles()[0]
-            self._src_dir.setText(directory)
+        # Migrate source and target
+        if settings.contains('source') or settings.contains('target'):
+            card = widgets.CopyJobCard()
+            card.source_path = settings.value('source', '')
+            card.target_path = settings.value('target', '')
+            self._cards_widget.add_card(card)
 
-    def _on_change_src_dir(self, d: str):
-        has_path = len(d) > 0
-        d = Path(d)
-        can_read = os.access(d, os.R_OK)
-        # TODO: Do in parallel
-        if False and has_path and can_read and d.exists():
-            try:
-                size, files = get_dir_size(Path(d))
-                self._src_label.setText(
-                    f'Files: {files}, Size: {bitmath.best_prefix(size).format("{value:.2f} {unit}")}')
-            except PermissionError:
-                self._src_label.clear()
-        else:
-            self._src_label.clear()
+        # Restore cards
+        if settings.contains('cards'):
+            self._cards_widget.card_list = settings.value('cards')
 
-    def _on_select_tgt(self):
-        self._dir_picker.setDirectory(self._tgt_dir.text())
-        if self._dir_picker.exec():
-            directory = self._dir_picker.selectedFiles()[0]
-            self._tgt_dir.setText(directory)
+        if len(self._cards_widget.card_list) == 0:
+            self._cards_widget.add_card(widgets.CopyJobCard())
 
-    def _on_copy_start(self):
-        src = self._src_dir.text()
-        dest = self._tgt_dir.text()
+    def _on_queue_start(self):
+        self.console_info('----- Starting queue -----')
+        self._cards_widget.set_enabled(False)
+        self._queue = []
+        for c in self._cards_widget.cards():
+            c.update_progress(100, 0, '-')
+            self._queue.append(c)
+        self._submit_next_copy()
+
+    def _submit_next_copy(self):
+        if len(self._queue) == 0:
+            self._on_queue_complete()
+            return
+
+        self._current_copy = self._queue.pop(0)
+        src = self._current_copy.source_path
+        dest = self._current_copy.target_path
+        job_id = self._current_copy.list_index
         if len(src) == 0:
-            self.console_error(f'Error: Missing source directory')
-            return
-        if len(dest) == 0:
-            self.console_error(f'Error: Missing destination directory')
-            return
-        self._columns_widget.setDisabled(True)
-        self.submit_copy.emit(src, dest)
+            self._on_copy_failed(
+                f'Error: Missing source directory (ID:{job_id})')
+        elif len(dest) == 0:
+            self._on_copy_failed(
+                f'Error: Missing destination directory (ID:{job_id})')
+        else:
+            self._connection = self._rclone.progress_update.connect(
+                self._current_copy.update_progress)
+            self.submit_copy.emit(src, dest)
 
     def _on_copy_complete(self, duration: str):
-        self._columns_widget.setEnabled(True)
-        self.console_complete(f'Copy complete (Elapsed: {duration})')
-        if self._shutdown_opt.isChecked():
-            self._on_request_shutdown()
+        self.console_info(f'Copy complete (Elapsed: {duration})')
+        self._current_copy.update_progress(1, 1, 'Done')
+        self._rclone.progress_update.disconnect()
+        self._submit_next_copy()
 
     def _on_copy_failed(self, msg: str):
-        self._columns_widget.setEnabled(True)
         self.console_error(msg)
+        self._current_copy.update_progress(100, 0,
+                                           '<font color="Red">Error</font>')
+        if self._connection:
+            self._rclone.progress_update.disconnect()
+            self._connection = False
+        self._submit_next_copy()
 
-    def _on_progress_update(self, total: int, sent: int, eta: str):
-        self._progress.setMaximum(total)
-        self._progress.setValue(sent)
-        self._eta_label.setText(f'eta: {eta}')
+    def _on_queue_complete(self):
+        self.console_info('--------------------------')
+        self._cards_widget.set_enabled(True)
+        self._current_copy = None
+        if self._shutdown_opt.isChecked():
+            self._on_request_shutdown()
 
     def _on_request_shutdown(self):
         logger = logging.getLogger('CopyTool')
@@ -379,15 +357,13 @@ class MainWindow(QMainWindow):
     def console_complete(self, m: str):
         self._logger.info(m)
         self._console.append(f'<font color="limegreen">{m}</font>')
-        self._progress.setRange(0, 0)
-        self._eta_label.setText(f'eta: -')
 
 
 def main():
     app = QApplication(sys.argv)
     QCoreApplication.setOrganizationName('EduceLab')
     QCoreApplication.setApplicationName('CopyTool')
-    QCoreApplication.setApplicationVersion("1.0.0")
+    QCoreApplication.setApplicationVersion("1.1.0")
 
     setup_logging()
     logger = logging.getLogger('CopyTool')
