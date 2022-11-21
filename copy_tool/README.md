@@ -3,7 +3,7 @@
 A GUI for copying data across filesystems using **rclone**.
 
 ## Installation
-
+### Source
 1. Set up a Python virtual environment:
    ```shell
    python -m venv venv
@@ -27,9 +27,9 @@ A GUI for copying data across filesystems using **rclone**.
    python copy_tool/main.py
    ```
    
-## Building a deployable app package
+### Building a deployable app package
 
-1. Follow the [Installation](#Installation) instructions
+1. Follow the [source installation](#Source) instructions
 
 2. Run `pyinstaller`:
    ```shell
