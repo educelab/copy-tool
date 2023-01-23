@@ -256,6 +256,7 @@ class MainWindow(QMainWindow):
         self._copy_btn.setText('Cancel')
         self._copy_btn.clicked.disconnect()
         self._copy_btn.clicked.connect(self._on_queue_cancel)
+        self._queue_canceled = False
 
         # run the prescript
         settings = QSettings()
