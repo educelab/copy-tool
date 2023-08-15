@@ -19,8 +19,8 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QDialog,
                                QSizePolicy, QSpinBox, QTextEdit, QVBoxLayout,
                                QWidget)
 
-import rclone
-import widgets
+import copy_tool.rclone as rclone
+import copy_tool.widgets as widgets
 
 
 class ApplicationLogFilter(logging.Filter):
