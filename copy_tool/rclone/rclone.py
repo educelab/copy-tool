@@ -1,9 +1,8 @@
-import argparse
 import re
 import sys
 from pathlib import Path
 from shutil import which
-from typing import Callable, Dict, List, Union
+from typing import Dict, List, Union
 
 """Regex to match/parse an rclone log message"""
 _RCLONE_REGEX_LOG_MSG = re.compile(
@@ -54,23 +53,28 @@ def parse_log_message(line: str) -> Union[Dict, None]:
 
 
 def exit_code_string(exit_code: int) -> str:
-    global _RCLONE_EXIT_CODE_MSGS
-    return _RCLONE_EXIT_CODE_MSGS[exit_code]
+    """Return the human-readable message for an rclone exit code.
 
-
-def default_log_listener(d: Dict):
-    """Default rclone log listener function. Prints the log message to stdout
-    using print().
-
-    :param d: Parsed progress report dict
-    :return: None
+    Falls back to a generic message for codes outside the documented range
+    (e.g. signal-based exits like 137/143) rather than raising IndexError.
     """
-    print(f'{d["date"]} {d["time"]} {d["loglevel"]}: {d["message"]}')
+    if 0 <= exit_code < len(_RCLONE_EXIT_CODE_MSGS):
+        return _RCLONE_EXIT_CODE_MSGS[exit_code]
+    return f'Unknown error (exit code {exit_code})'
 
 
-def null_log_listener(d: Dict):
-    """No-op rclone log listener function."""
-    pass
+def classify_exit_code(exit_code: int) -> str:
+    """Classify an rclone exit code as 'complete', 'warning', or 'error'.
+
+    * 0 -> 'complete' (success)
+    * 9 -> 'warning'  (success, no files transferred)
+    * everything else (1-8 and any unexpected code) -> 'error'
+    """
+    if exit_code == 0:
+        return 'complete'
+    if exit_code == 9:
+        return 'warning'
+    return 'error'
 
 
 def executable_path() -> Union[str, None]:
@@ -159,97 +163,3 @@ def default_args() -> List[str]:
         '--stats-log-level', 'NOTICE',
         '--stats-one-line'
     ]
-
-
-def copy(src: str, dest: str,
-         listener: Callable[[Dict], None] = default_log_listener) -> int:
-    """Run the rclone copy command.
-
-    :param src: Source file or directory
-    :param dest: Destination directory
-    :param listener: Callable for handling progress updates
-    :return: process return code
-    """
-    args = ['copy', src, dest]
-    return rclone(args=args, listener=listener)
-
-
-def rclone(args: List[str],
-           listener: Callable[[Dict], None] = default_log_listener) -> int:
-    """Run rclone with the given list of arguments. Note that default_args()
-    for reporting progress are always prepended to args:
-
-    rclone --stats 500ms --stats-log-level NOTICE --stats-one-line [args...]
-
-    :param args: List of program arguments
-    :param listener: Callable for handling progress updates
-    :return: process return code
-    """
-    import subprocess as sp
-
-    # Add the rclone executable as the first argument
-    rclone_exe = executable_path()
-    if rclone_exe is None:
-        raise FileNotFoundError('rclone executable not found')
-    args[0:0] = [rclone_exe, *default_args()]
-
-    # (Windows) For some reason, we have to explicitly disable the extra
-    # subprocess window in a way we didn't before
-    startupinfo = None
-    if sys.platform == 'win32':
-        startupinfo = sp.STARTUPINFO()
-        startupinfo.dwFlags |= sp.STARTF_USESHOWWINDOW
-        startupinfo.wShowWindow = sp.SW_HIDE
-
-    # Run rclone
-    return_code = None
-    with sp.Popen(args=args, stderr=sp.PIPE, startupinfo=startupinfo) as proc:
-        def read_buffer(buffer):
-            """Read from stderr two bytes at time and handle new lines"""
-            b = proc.stderr.read(2).decode()
-            if b is not None:
-                buffer = f'{buffer}{b}'
-            new_line = None
-            if '\n' in buffer:
-                new_line, buffer = buffer.split(sep='\n')
-            if new_line is not None:
-                parsed = parse_log_message(new_line)
-                if parsed is not None:
-                    listener(parsed)
-            return buffer
-
-        def flush_buffer(buffer):
-            """Read all remaining bytes from buffer and parse all new lines"""
-            b = proc.stderr.read().decode()
-            if b is not None:
-                buffer = f'{buffer}{b}'
-            new_lines = None
-            if '\n' in buffer:
-                new_lines = buffer.split(sep='\n')
-            if new_lines is None:
-                return
-            for n in new_lines:
-                parsed = parse_log_message(n)
-                if parsed is not None:
-                    listener(parsed)
-
-        # Read and parse stderr until the process ends
-        stderr_buffer = ''
-        while return_code is None:
-            stderr_buffer = read_buffer(stderr_buffer)
-            return_code = proc.poll()
-        flush_buffer(stderr_buffer)
-
-    return return_code
-
-
-def main():
-    parser = argparse.ArgumentParser('rclone.py')
-    parser.add_argument('input', metavar='SRC', help='Input file or directory')
-    parser.add_argument('output', metavar='DEST', help='Output directory')
-    args = parser.parse_args()
-    copy(src=args.input, dest=args.output)
-
-
-if __name__ == '__main__':
-    main()

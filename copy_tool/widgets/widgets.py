@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (QApplication, QFileDialog, QFrame, QGroupBox,
 
 
 class CopyJobCard(QFrame):
-    clickedClose = Signal(int)
+    clickedClose = Signal(object)
 
     _list_index = None
 
@@ -132,7 +132,7 @@ class CopyJobCard(QFrame):
         self._eta_label.setText(f'eta: {eta}')
 
     def _on_click_close(self):
-        self.clickedClose.emit(self._list_index)
+        self.clickedClose.emit(self)
 
     @property
     def list_index(self) -> int:
@@ -169,8 +169,6 @@ class CopyJobCard(QFrame):
 
 
 class AddCard(QPushButton):
-    clickedClose = Signal(int)
-
     def __init__(self, parent=None):
         super(AddCard, self).__init__(parent)
         self.setLayout(QVBoxLayout())
@@ -243,23 +241,34 @@ class CardListWidget(QScrollArea):
         self.add_card(CopyJobCard())
 
     def add_card(self, card: QWidget):
-        card_cnt = self._cards_holder.layout().count()
-        card.list_index = card_cnt
-        self._cards_holder.layout().insertWidget(card_cnt - 1, card)
+        # Insert before the trailing AddCard button (always the last item).
+        insert_at = max(self._cards_holder.layout().count() - 1, 0)
+        self._cards_holder.layout().insertWidget(insert_at, card)
         self._cards.append(card)
         card.clickedClose.connect(self.remove_card)
-        self.setMaximumHeight(max(self._cards_holder.sizeHint().height(),
-                                  self.sizeHint().height()))
+        self._renumber()
+        self._update_height()
 
-    def remove_card(self, idx: int):
-        w = self._cards.pop(idx - 1)
-        w.setParent(None)
-        self._cards_holder.layout().removeWidget(w)
+    def remove_card(self, card: QWidget):
+        # Identity-based removal so a stale/duplicate index can never pop the
+        # wrong card. Removing the last card is allowed (empty is a valid
+        # state now that cards persist as JSON).
+        if card not in self._cards:
+            return
+        self._cards.remove(card)
+        card.clickedClose.disconnect(self.remove_card)
+        card.setParent(None)
+        self._cards_holder.layout().removeWidget(card)
+        self._renumber()
+        self._update_height()
+
+    def _renumber(self):
+        for idx, card in enumerate(self._cards):
+            card.list_index = idx + 1
+
+    def _update_height(self):
         self.setMaximumHeight(max(self._cards_holder.sizeHint().height(),
                                   self.sizeHint().height()))
-        # update the cards
-        for idx, w in enumerate(self._cards):
-            w.list_index = idx + 1
 
     def cards(self):
         return self._cards
@@ -275,9 +284,17 @@ class CardListWidget(QScrollArea):
 
     @card_list.setter
     def card_list(self, cards):
-        for c in cards:
+        # Replace any existing cards (assignment semantics, not append).
+        for existing in list(self._cards):
+            self.remove_card(existing)
+        for c in (cards or []):
+            try:
+                src, tgt = c
+            except (TypeError, ValueError):
+                # Skip malformed entries rather than crash on load.
+                continue
             card = CopyJobCard()
-            card.settings = c
+            card.settings = (src, tgt)
             self.add_card(card)
 
 

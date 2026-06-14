@@ -1,3 +1,4 @@
+import atexit
 import datetime as dt
 import logging
 import math
@@ -6,11 +7,10 @@ import sys
 import time
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Tuple
 
 import bitmath
-from PySide6.QtCore import (QCoreApplication, QFileInfo, QProcess, QSettings,
-                            QStandardPaths, Qt, Signal)
+from PySide6.QtCore import (QByteArray, QCoreApplication, QFileInfo, QProcess,
+                            QSettings, QStandardPaths, Qt, Signal)
 from PySide6.QtGui import QAction, QCloseEvent, QIcon
 from PySide6.QtWidgets import (QApplication, QCheckBox, QDialog,
                                QDialogButtonBox, QFileDialog, QGridLayout,
@@ -21,17 +21,14 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QDialog,
 
 import copy_tool.rclone as rclone
 import copy_tool.widgets as widgets
+from copy_tool import persistence
 
 
 class ApplicationLogFilter(logging.Filter):
     allowed_names = ['CopyTool']
 
     def filter(self, record):
-        for a in self.allowed_names:
-            if a in record.name:
-                return True
-            else:
-                return False
+        return any(a in record.name for a in self.allowed_names)
 
 
 def setup_logging(log_level=logging.INFO):
@@ -72,17 +69,6 @@ def setup_logging(log_level=logging.INFO):
     # noinspection PyArgumentList
     logging.basicConfig(format=line_format, level=log_level,
                         datefmt=date_format, handlers=handlers)
-
-
-def get_dir_size(d: Path) -> Tuple[int, int]:
-    """Recursively get the size and number of files in a directory."""
-    cnt = 0
-    size = 0
-    for p in d.rglob('*'):
-        if p.is_file():
-            cnt += 1
-            size += p.stat().st_size
-    return size, cnt
 
 
 def app_icon_path():
@@ -177,7 +163,10 @@ class MainWindow(QMainWindow):
             self._copy_ctrls.layout().addSpacing(25)
 
         self._copy_btn = QPushButton('Start')
-        self._copy_btn.clicked.connect(self._on_queue_start)
+        # Single persistent connection; the handler branches on self._running
+        # rather than swapping connections (which previously left the button
+        # stuck on "Cancel" and could raise on a bare disconnect()).
+        self._copy_btn.clicked.connect(self._on_copy_button)
         self._copy_ctrls.layout().addWidget(self._copy_btn, stretch=1)
 
         self._console = QTextEdit()
@@ -203,59 +192,157 @@ class MainWindow(QMainWindow):
         self._queue_canceled = False
         self._current_copy = None
         self._queue = []
+        self._running = False
 
         self._load_settings()
 
-    def __del__(self):
-        logger = logging.getLogger('CopyTool')
-        logger.info('Shutting down')
-        self._on_queue_cancel()
-
     def closeEvent(self, event: QCloseEvent):
+        # Confirm before tearing down an in-flight transfer.
+        if self._any_process_running():
+            resp = QMessageBox.question(
+                self, 'CopyTool',
+                'A transfer is in progress. Quit and cancel it?',
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if resp != QMessageBox.Yes:
+                event.ignore()
+                return
+
+        self._logger.info('Shutting down')
+        self._queue = []
+        self._queue_canceled = True
+        self._stop_processes()
         self._save_settings()
+
+        # Drop the crash-handler reference so atexit doesn't hold a destroyed
+        # window.
+        global _active_window
+        if _active_window is self:
+            _active_window = None
         event.accept()
+
+    def _any_process_running(self) -> bool:
+        for proc in (self._prescript, self._rclone):
+            try:
+                if proc.state() != QProcess.NotRunning:
+                    return True
+            except RuntimeError:
+                # Underlying C++ object already deleted; treat as not running.
+                pass
+        return False
+
+    def _stop_processes(self):
+        """Terminate (then kill) any running child processes. Safe to call
+        even if the underlying C++ QProcess objects have been deleted."""
+        for proc in (self._prescript, self._rclone):
+            try:
+                if proc.state() != QProcess.NotRunning:
+                    proc.terminate()
+                    if not proc.waitForFinished(5000):
+                        proc.kill()
+                        proc.waitForFinished(2000)
+            except RuntimeError:
+                pass
 
     def _save_settings(self):
         settings = QSettings()
 
         settings.setValue("mainWin/geometry", self.saveGeometry())
         settings.setValue("mainWin/state", self.saveState())
+        self._write_cards(settings, self._cards_widget.card_list)
 
-        settings.setValue('cards', self._cards_widget.card_list)
-        if settings.contains('source'):
-            settings.remove('source')
-        if settings.contains('target'):
-            settings.remove('target')
+    @staticmethod
+    def _write_cards(settings: QSettings, cards):
+        """Persist the card list as a single JSON string (native-backend
+        safe) along with the schema version."""
+        settings.setValue(persistence.VERSION_KEY, persistence.SETTINGS_VERSION)
+        settings.setValue(persistence.CARDS_KEY,
+                          persistence.serialize_cards(cards))
 
     def _load_settings(self):
         settings = QSettings()
-        if settings.contains("mainWin/geometry"):
-            self.restoreGeometry(settings.value("mainWin/geometry"))
-        if settings.contains("mainWin/state"):
-            self.restoreState(settings.value("mainWin/state"))
+        # Restore each piece independently so one corrupt value can't take
+        # down the others (or the whole startup).
+        self._restore_window_geometry(settings)
+        self._load_cards(settings)
 
-        # Migrate source and target
-        if settings.contains('source') or settings.contains('target'):
-            card = widgets.CopyJobCard()
-            card.source_path = settings.value('source', '')
-            card.target_path = settings.value('target', '')
-            self._cards_widget.add_card(card)
+    def _restore_window_geometry(self, settings: QSettings):
+        try:
+            geom = settings.value("mainWin/geometry")
+            if isinstance(geom, QByteArray) and not geom.isEmpty():
+                self.restoreGeometry(geom)
+        except Exception:
+            self._logger.exception('Failed to restore window geometry')
+        try:
+            state = settings.value("mainWin/state")
+            if isinstance(state, QByteArray) and not state.isEmpty():
+                self.restoreState(state)
+        except Exception:
+            self._logger.exception('Failed to restore window state')
 
-        # Restore cards
-        if settings.contains('cards'):
-            self._cards_widget.card_list = settings.value('cards')
+    def _load_cards(self, settings: QSettings):
+        """Load job cards, migrating legacy formats and recovering from any
+        corrupt value. Seeds one empty card only on a true first launch."""
+        first_launch = False
+        try:
+            if settings.contains(persistence.CARDS_KEY):
+                cards = persistence.deserialize_cards(
+                    settings.value(persistence.CARDS_KEY, '', type=str))
+            elif (settings.contains(persistence.LEGACY_CARDS_KEY)
+                  or settings.contains(persistence.LEGACY_SOURCE_KEY)
+                  or settings.contains(persistence.LEGACY_TARGET_KEY)):
+                cards = self._migrate_legacy_cards(settings)
+            else:
+                first_launch = True
+                cards = []
+        except Exception:
+            self._logger.exception('Failed to load cards; resetting')
+            if settings.contains(persistence.CARDS_KEY):
+                settings.remove(persistence.CARDS_KEY)
+            first_launch = True
+            cards = []
 
-        if len(self._cards_widget.card_list) == 0:
+        if cards:
+            self._cards_widget.card_list = cards
+        elif first_launch:
+            # Friendly default for a brand-new install.
             self._cards_widget.add_card(widgets.CopyJobCard())
+        # else: a genuinely empty saved list — respect it (just the + button).
+
+    def _migrate_legacy_cards(self, settings: QSettings):
+        """Convert pre-1.3.0 settings to the new JSON format and remove the
+        legacy keys."""
+        legacy_cards = settings.value(persistence.LEGACY_CARDS_KEY)
+        legacy_source = (settings.value(persistence.LEGACY_SOURCE_KEY, '')
+                         if settings.contains(persistence.LEGACY_SOURCE_KEY)
+                         else None)
+        legacy_target = (settings.value(persistence.LEGACY_TARGET_KEY, '')
+                         if settings.contains(persistence.LEGACY_TARGET_KEY)
+                         else None)
+        cards = persistence.build_migrated_cards(legacy_cards, legacy_source,
+                                                 legacy_target)
+        self._write_cards(settings, cards)
+        for key in (persistence.LEGACY_CARDS_KEY, persistence.LEGACY_SOURCE_KEY,
+                    persistence.LEGACY_TARGET_KEY):
+            if settings.contains(key):
+                settings.remove(key)
+        self._logger.info('Migrated legacy settings to v%d',
+                          persistence.SETTINGS_VERSION)
+        return cards
+
+    def _on_copy_button(self):
+        """Single Start/Cancel handler; branches on the running state."""
+        if self._running:
+            self._on_queue_cancel()
+        else:
+            self._on_queue_start()
 
     def _on_queue_start(self):
         self.console_info('----- Starting queue -----')
         self._cards_widget.set_enabled(False)
         self._shutdown_opt.setEnabled(False)
 
+        self._running = True
         self._copy_btn.setText('Cancel')
-        self._copy_btn.clicked.disconnect()
-        self._copy_btn.clicked.connect(self._on_queue_cancel)
         self._queue_canceled = False
 
         # run the prescript
@@ -270,9 +357,13 @@ class MainWindow(QMainWindow):
             self._prescript.setProgram(prescript.filePath())
             self._prescript.start()
         else:
-            self.console_warning(
+            self.console_error(
                 f'Prescript not executable: {prescript.fileName()}')
-            self._on_queue_cancel()
+            # Not user-initiated, but the run cannot proceed; mark canceled so
+            # we don't trigger shutdown-on-complete, and reset the UI.
+            self._queue = []
+            self._queue_canceled = True
+            self._on_queue_stop()
 
     def _on_queue_setup(self):
         self._queue = []
@@ -307,22 +398,17 @@ class MainWindow(QMainWindow):
             self._rclone.start()
 
     def _on_queue_cancel(self):
+        self.console_warning('Canceling transfers...')
         self._queue = []
         self._queue_canceled = True
-        if self._prescript.state() != QProcess.NotRunning:
-            self._prescript.terminate()
-            self._rclone.waitForFinished(5000)
-        if self._rclone.state() != QProcess.NotRunning:
-            self._rclone.terminate()
-            self._rclone.waitForFinished(5000)
+        self._stop_processes()
 
     def _on_queue_stop(self):
         self.console_info('--------------------------')
         self._cards_widget.set_enabled(True)
         self._shutdown_opt.setEnabled(True)
+        self._running = False
         self._copy_btn.setText('Start')
-        self._copy_btn.clicked.disconnect()
-        self._copy_btn.clicked.connect(self._on_queue_start)
 
         self._current_copy = None
         if self._shutdown_opt.isChecked() and not self._queue_canceled:
@@ -340,14 +426,15 @@ class MainWindow(QMainWindow):
         if self._queue_canceled:
             self._on_copy_canceled('Transfers canceled')
         elif exit_status == QProcess.CrashExit or exit_code != 0:
-            self._on_copy_failed(f'Prescript failed')
+            self._on_copy_failed('Prescript failed')
         else:
             self._on_queue_setup()
 
     def _on_copy_complete(self):
-        duration = dt.datetime.now(tz=dt.timezone.utc) - self._copy_start
-        self.console_info(f'Copy complete (Elapsed: {duration})')
-        self._current_copy.update_progress(1, 1, 'Done')
+        if self._current_copy is not None:
+            duration = dt.datetime.now(tz=dt.timezone.utc) - self._copy_start
+            self.console_info(f'Copy complete (Elapsed: {duration})')
+            self._current_copy.update_progress(1, 1, 'Done')
         self.advance_queue.emit()
 
     def _on_copy_failed(self, msg: str):
@@ -371,14 +458,18 @@ class MainWindow(QMainWindow):
             self._on_copy_canceled('Transfers canceled')
         elif exit_status == QProcess.CrashExit:
             self._on_copy_failed(self._rclone.errorString())
-        elif exit_code in range(1, 8):
-            self._on_copy_failed(f'Error: {rclone.exit_code_string(exit_code)}')
-        elif exit_code in [7, 9]:
-            self.console_warning(
-                f'Warning: {rclone.exit_code_string(exit_code)}')
-            self._on_copy_complete()
         else:
-            self._on_copy_complete()
+            # 0 -> complete, 9 -> complete (warning), 1-8/unexpected -> failure.
+            verdict = rclone.classify_exit_code(exit_code)
+            if verdict == 'complete':
+                self._on_copy_complete()
+            elif verdict == 'warning':
+                self.console_warning(
+                    f'Warning: {rclone.exit_code_string(exit_code)}')
+                self._on_copy_complete()
+            else:
+                self._on_copy_failed(
+                    f'Error: {rclone.exit_code_string(exit_code)}')
 
     def _on_stderr_ready(self):
         lines = str(self._rclone.readAllStandardError(), 'utf-8').splitlines()
@@ -393,15 +484,23 @@ class MainWindow(QMainWindow):
             return
 
         if status['type'] == 'PROGRESS':
-            # Convert total and sent for bitmath
-            total = bitmath.parse_string(
-                f'{status["total"]} {status["total_unit"]}').best_prefix()
-            sent = bitmath.parse_string(
-                f'{status["sent"]} {status["sent_unit"]}')
+            # A late/buffered progress line can arrive after the job finished.
+            if self._current_copy is None:
+                return
 
-            # Convert to ints for progress bar
-            sent = int(math.floor(total.from_other(sent).value))
-            total = int(math.floor(total.value))
+            # Convert total and sent for bitmath
+            try:
+                total = bitmath.parse_string(
+                    f'{status["total"]} {status["total_unit"]}').best_prefix()
+                sent = bitmath.parse_string(
+                    f'{status["sent"]} {status["sent_unit"]}')
+
+                # Convert to ints for progress bar
+                sent = int(math.floor(total.from_other(sent).value))
+                total = int(math.floor(total.value))
+            except (ValueError, TypeError):
+                logger.debug(f'[STDERR] unparsable progress: {line}')
+                return
 
             # Report transfer progress to debug log
             xfr = ''
@@ -591,11 +690,37 @@ class SettingsWindow(QDialog):
         self._pre_script.setToolTip(self._pre_script.text())
 
 
+#: The live MainWindow, used by the crash/exit handlers to stop child
+#: processes. Set once the window is constructed.
+_active_window = None
+
+
+def _terminate_active_processes():
+    """Best-effort termination of any running child processes. Safe to call
+    during interpreter shutdown / from a crash handler."""
+    if _active_window is not None:
+        try:
+            _active_window._stop_processes()
+        except Exception:
+            pass
+
+
+def _excepthook(exc_type, exc, tb):
+    """Log unhandled exceptions and stop child processes before exiting so a
+    crash never orphans a running rclone/prescript."""
+    logging.getLogger('CopyTool').critical(
+        'Unhandled exception', exc_info=(exc_type, exc, tb))
+    _terminate_active_processes()
+    sys.__excepthook__(exc_type, exc, tb)
+
+
 def main():
+    global _active_window
+
     app = QApplication(sys.argv)
     QCoreApplication.setOrganizationName('EduceLab')
     QCoreApplication.setApplicationName('CopyTool')
-    QCoreApplication.setApplicationVersion("1.2.0")
+    QCoreApplication.setApplicationVersion("1.3.0")
 
     setup_logging(log_level=logging.DEBUG)
     logger = logging.getLogger('CopyTool')
@@ -604,10 +729,15 @@ def main():
         f'{QCoreApplication.applicationName()} '
         f'v{QCoreApplication.applicationVersion()}')
 
+    # Stop child processes on unhandled exceptions and on any interpreter exit.
+    sys.excepthook = _excepthook
+    atexit.register(_terminate_active_processes)
+
     app_icon = QIcon(app_icon_path())
     app.setWindowIcon(app_icon)
 
     main_window = MainWindow()
+    _active_window = main_window
     main_window.setWindowTitle('CopyTool')
     main_window.setWindowIcon(app_icon)
     main_window.show()
