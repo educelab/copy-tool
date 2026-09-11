@@ -1,0 +1,13 @@
+# Dependency set for the CopyTool "legacy" build -- the artifact for hosts older
+# than 22.04, built on focal's stock Python 3.8. Used directly by the
+# build:ubuntu-legacy CI job, not via a setup.cfg extra: that job installs the
+# project with --ignore-requires-python, and an extra would put that override on
+# dependency resolution too.
+bitmath
+pyinstaller
+# 6.7 raised its Python floor from 3.8 to 3.9, so on focal's 3.8 pip resolves the
+# 6.6 series regardless. The ceiling is explicit so this file still describes a
+# supported combination if it is ever read by a newer interpreter. Note 6.10
+# additionally moved its wheels to manylinux_2_34, which glibc 2.31 cannot load
+# at all, so there is no route to a current PySide6 on a 20.04 target.
+PySide6<6.7
