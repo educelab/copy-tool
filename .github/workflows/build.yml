@@ -1,26 +1,133 @@
 name: Build
 
+# Publishing reacts to the Test workflow's conclusion, so a red commit can
+# never produce a published build. Two workflow_run facts drive the shape of
+# this file: it always executes the copy on the default branch, and
+# github.ref/github.sha point at the default branch rather than the commit that
+# triggered the tests. The version job resolves the real ref from the event
+# payload and every other job checks out that SHA.
 on:
-  push:
-    branches: [main]
-    tags: ["v*"]
+  workflow_run:
+    workflows: ["Test"]
+    types: [completed]
   pull_request:
   workflow_dispatch:
 
-# Deploy builds. Every job produces a release-ready package and uploads it as a
-# workflow artifact; publishing to GitHub Packages is a later step and is
-# deliberately not wired up yet.
+# Serialize per target so two pushes to main cannot race the rolling 'edge'
+# tag into an inconsistent state.
+concurrency:
+  group: build-${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_branch || github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
 
 jobs:
-  macos:
-    name: macOS
-    runs-on: macos-latest
+  # Decides what to build, what to call it, and whether to publish. Runs in
+  # seconds, so a tag/version disagreement fails here rather than after four
+  # PyInstaller builds.
+  version:
+    name: Resolve version
+    runs-on: ubuntu-latest
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+      version: ${{ steps.resolve.outputs.version }}
+      channel: ${{ steps.resolve.outputs.channel }}
+      build: ${{ steps.resolve.outputs.build }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
+          # Tags are needed to confirm a v* head_branch is a real tag.
+          fetch-depth: 0
+
+      - id: resolve
+        shell: bash
+        # head_branch is attacker-controllable on fork PRs, so it arrives as an
+        # env var rather than interpolated into the script body.
+        env:
+          EVENT: ${{ github.event_name }}
+          HEAD: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          set -euo pipefail
+          base=$(python3 -c 'from copy_tool._version import __version__; print(__version__)')
+          sha=$(git rev-parse HEAD)
+          # core.abbrev is length-adaptive as a repo grows; pin the width so
+          # stamps stay comparable across builds.
+          short=$(git rev-parse --short=8 HEAD)
+
+          channel=none
+          build=true
+          if [ "$EVENT" = workflow_run ]; then
+            case "$HEAD" in
+              main)
+                channel=edge
+                ;;
+              v*)
+                if git rev-parse -q --verify "refs/tags/$HEAD" >/dev/null; then
+                  channel=release
+                else
+                  build=false
+                fi
+                ;;
+              *)
+                # A test run for a PR or topic branch. The pull_request
+                # trigger already builds those directly.
+                build=false
+                ;;
+            esac
+          fi
+
+          case "$channel" in
+            edge)
+              # PEP 440 strips leading zeros from an all-numeric local segment,
+              # which would silently corrupt a hash like 0012345. The 'g'
+              # prefix (git describe's convention) keeps it non-numeric.
+              version="${base}+edge.g${short}"
+              ;;
+            release)
+              if [ "${HEAD#v}" != "$base" ]; then
+                echo "::error::tag ${HEAD} disagrees with copy_tool/_version.py (${base}); bump the file or retag"
+                exit 1
+              fi
+              version="$base"
+              ;;
+            *)
+              version="${base}+dev.g${short}"
+              ;;
+          esac
+
+          echo "Resolved $version (channel=$channel, build=$build) at $sha"
+          {
+            echo "sha=$sha"
+            echo "version=$version"
+            echo "channel=$channel"
+            echo "build=$build"
+          } >> "$GITHUB_OUTPUT"
+
+  # Pinned rather than macos-latest so the macOS deployment floor is explicit,
+  # the same reason the Ubuntu jobs build in containers. macos-26 is arm64;
+  # Intel Macs are not covered, hence the asset name.
+  macos:
+    name: macOS (arm64)
+    needs: version
+    if: needs.version.outputs.build == 'true'
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.sha }}
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      # Stamped before pip install so the installed distribution and the
+      # frozen binary report the same version.
+      - name: Stamp version
+        shell: bash
+        run: printf '__version__ = "%s"\n' '${{ needs.version.outputs.version }}' > copy_tool/_version.py
 
       # The spec files bundle whatever rclone is on PATH at build time.
       - name: Install rclone
@@ -35,19 +142,29 @@ jobs:
       # Artifact uploads are zipped without POSIX permissions, which would
       # strip the executable bit inside the .app bundle. Tar it first.
       - name: Package
-        run: tar -czf CopyTool-macos.tar.gz -C dist CopyTool.app
+        run: tar -czf CopyTool-macos-arm64.tar.gz -C dist CopyTool.app
 
       - uses: actions/upload-artifact@v4
         with:
-          name: copytool-macos
-          path: CopyTool-macos.tar.gz
+          name: copytool-macos-arm64
+          path: CopyTool-macos-arm64.tar.gz
           retention-days: 7
 
   windows:
     name: Windows
+    needs: version
+    if: needs.version.outputs.build == 'true'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.sha }}
+
+      # bash, not PowerShell: Windows PowerShell's '>' writes UTF-16LE, which
+      # Python cannot import.
+      - name: Stamp version
+        shell: bash
+        run: printf '__version__ = "%s"\n' '${{ needs.version.outputs.version }}' > copy_tool/_version.py
 
       - uses: actions/setup-python@v5
         with:
@@ -65,10 +182,14 @@ jobs:
           python -m pip install .
           pyinstaller copy_tool/copy_tool_Windows.spec
 
+      - name: Package
+        shell: bash
+        run: mv dist/CopyTool.exe CopyTool-windows.exe
+
       - uses: actions/upload-artifact@v4
         with:
           name: copytool-windows
-          path: dist/CopyTool.exe
+          path: CopyTool-windows.exe
           retention-days: 7
 
   # Primary Ubuntu build, on 22.04 (jammy). PyInstaller links the build host's
@@ -78,6 +199,8 @@ jobs:
   # container rather than on a runner image so the glibc floor stays pinned.
   ubuntu:
     name: Ubuntu 22.04
+    needs: version
+    if: needs.version.outputs.build == 'true'
     runs-on: ubuntu-latest
     container: ubuntu:22.04
     env:
@@ -97,6 +220,12 @@ jobs:
           curl https://rclone.org/install.sh | bash
 
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.sha }}
+
+      - name: Stamp version
+        shell: bash
+        run: printf '__version__ = "%s"\n' '${{ needs.version.outputs.version }}' > copy_tool/_version.py
 
       - name: Build
         run: |
@@ -124,6 +253,8 @@ jobs:
   # Retire this job once every target host is on 22.04+.
   ubuntu-legacy:
     name: Ubuntu 20.04 (legacy)
+    needs: version
+    if: needs.version.outputs.build == 'true'
     runs-on: ubuntu-latest
     container: ubuntu:20.04
     env:
@@ -150,6 +281,12 @@ jobs:
           curl https://rclone.org/install.sh | bash
 
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.sha }}
+
+      - name: Stamp version
+        shell: bash
+        run: printf '__version__ = "%s"\n' '${{ needs.version.outputs.version }}' > copy_tool/_version.py
 
       # Deps first, honouring requires-python so pip picks the 3.8-compatible
       # PySide6. Then the project alone with --no-deps, so --ignore-requires-python
@@ -173,3 +310,44 @@ jobs:
           name: copytool-ubuntu-20.04-legacy
           path: CopyTool-ubuntu-20.04-legacy.tar.gz
           retention-days: 7
+
+  # One release per run, only once every platform has built, so users never see
+  # a release where some platforms updated and others did not.
+  publish:
+    name: Publish release
+    needs: [version, macos, windows, ubuntu, ubuntu-legacy]
+    if: needs.version.outputs.channel != 'none'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CHANNEL: ${{ needs.version.outputs.channel }}
+          VERSION: ${{ needs.version.outputs.version }}
+          SHA: ${{ needs.version.outputs.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$CHANNEL" = edge ]; then
+            # gh updates an existing release's assets but will not move its
+            # tag, which would leave fresh binaries hanging off a stale commit.
+            # Deleting the tag with the release is what makes 'edge' roll.
+            gh release delete edge --cleanup-tag --yes || true
+            gh release create edge \
+              --prerelease \
+              --target "$SHA" \
+              --title "edge ($VERSION)" \
+              --notes "Rolling build of the latest \`main\` commit (\`$SHA\`). Unstable; superseded on every push. The running app reports \`$VERSION\` in its console pane and log file." \
+              dist/*
+          else
+            gh release create "v$VERSION" \
+              --title "v$VERSION" \
+              --generate-notes \
+              dist/*
+          fi

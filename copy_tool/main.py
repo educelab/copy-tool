@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QDialog,
 import copy_tool.rclone as rclone
 import copy_tool.widgets as widgets
 from copy_tool import persistence
+from copy_tool._version import __version__
 
 
 class ApplicationLogFilter(logging.Filter):
@@ -720,7 +721,7 @@ def main():
     app = QApplication(sys.argv)
     QCoreApplication.setOrganizationName('EduceLab')
     QCoreApplication.setApplicationName('CopyTool')
-    QCoreApplication.setApplicationVersion("1.3.0")
+    QCoreApplication.setApplicationVersion(__version__)
 
     setup_logging(log_level=logging.DEBUG)
     logger = logging.getLogger('CopyTool')
