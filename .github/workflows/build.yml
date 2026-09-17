@@ -355,6 +355,14 @@ jobs:
           # A silently empty dist would publish a release with no binaries.
           [ -n "$(ls -A dist/)" ] || { echo "::error::no artifacts to publish"; exit 1; }
 
+          # Re-running only the failed jobs may not carry the version job's
+          # outputs across. Catch that here rather than force-moving a tag to
+          # an empty sha or retitling the live release "edge ()".
+          [ -n "$VERSION" ] && [ -n "$SHA" ] || {
+            echo "::error::version job outputs are missing; re-run the whole workflow, not just failed jobs"
+            exit 1
+          }
+
           # The upload endpoint intermittently returns HTTP 500 on assets this
           # size, which is what took a release offline once.
           upload() {
