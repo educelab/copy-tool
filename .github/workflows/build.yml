@@ -29,14 +29,21 @@ jobs:
   version:
     name: Resolve version
     runs-on: ubuntu-latest
-    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    # Fork PR refs are never reached: checkout v7 refuses to check them out
+    # under workflow_run, and they are not publishable anyway. The head_branch
+    # test here is a cheap pre-filter; the tag itself is verified below.
+    if: >-
+      github.event_name != 'workflow_run'
+      || (github.event.workflow_run.conclusion == 'success'
+          && (github.event.workflow_run.head_branch == 'main'
+              || startsWith(github.event.workflow_run.head_branch, 'v')))
     outputs:
       sha: ${{ steps.resolve.outputs.sha }}
       version: ${{ steps.resolve.outputs.version }}
       channel: ${{ steps.resolve.outputs.channel }}
       build: ${{ steps.resolve.outputs.build }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
           # Tags are needed to confirm a v* head_branch is a real tag.
@@ -115,11 +122,11 @@ jobs:
     if: needs.version.outputs.build == 'true'
     runs-on: macos-26
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.version.outputs.sha }}
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -144,7 +151,7 @@ jobs:
       - name: Package
         run: tar -czf CopyTool-macos-arm64.tar.gz -C dist CopyTool.app
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: copytool-macos-arm64
           path: CopyTool-macos-arm64.tar.gz
@@ -156,7 +163,7 @@ jobs:
     if: needs.version.outputs.build == 'true'
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.version.outputs.sha }}
 
@@ -166,7 +173,7 @@ jobs:
         shell: bash
         run: printf '__version__ = "%s"\n' '${{ needs.version.outputs.version }}' > copy_tool/_version.py
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -186,7 +193,7 @@ jobs:
         shell: bash
         run: mv dist/CopyTool.exe CopyTool-windows.exe
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: copytool-windows
           path: CopyTool-windows.exe
@@ -219,7 +226,7 @@ jobs:
           apt-get install -y python3.12-dev python3.12-venv binutils libgl-dev libglib2.0-dev qt6-base-dev
           curl https://rclone.org/install.sh | bash
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.version.outputs.sha }}
 
@@ -239,7 +246,7 @@ jobs:
       - name: Package
         run: tar -czf CopyTool-ubuntu-22.04.tar.gz -C dist CopyTool
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: copytool-ubuntu-22.04
           path: CopyTool-ubuntu-22.04.tar.gz
@@ -280,7 +287,7 @@ jobs:
             libxcb-xinerama0 libxcb-randr0 libxcb-xkb1 libxcb-sync1 libxcb-xfixes0
           curl https://rclone.org/install.sh | bash
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.version.outputs.sha }}
 
@@ -305,7 +312,7 @@ jobs:
       - name: Package
         run: tar -czf CopyTool-ubuntu-20.04-legacy.tar.gz -C dist CopyTool
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: copytool-ubuntu-20.04-legacy
           path: CopyTool-ubuntu-20.04-legacy.tar.gz
@@ -321,7 +328,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
@@ -329,11 +336,18 @@ jobs:
       - name: Publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # This job has no checkout, so gh cannot infer the repo from a git
+          # remote and needs it passed explicitly.
+          GH_REPO: ${{ github.repository }}
           CHANNEL: ${{ needs.version.outputs.channel }}
           VERSION: ${{ needs.version.outputs.version }}
           SHA: ${{ needs.version.outputs.sha }}
         run: |
           set -euo pipefail
+          ls -l dist/
+          # A silently empty dist would publish a release with no binaries.
+          [ -n "$(ls -A dist/)" ] || { echo "::error::no artifacts to publish"; exit 1; }
+
           if [ "$CHANNEL" = edge ]; then
             # gh updates an existing release's assets but will not move its
             # tag, which would leave fresh binaries hanging off a stale commit.
