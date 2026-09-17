@@ -145,9 +145,12 @@ Order matters: assets upload *before* the tag moves and the title is rewritten.
 Relabelling first would leave a failed run advertising a commit whose binaries
 never landed, which is worse than a stale release.
 
-The step is idempotent -- `--clobber`, a forced ref update, and an overwriting
-edit -- so `gh run rerun <id> --failed` is the recovery from any partial
-failure. It is bounded by artifact retention (7 days), not by the 30-day rerun
+Both channels create-or-update rather than create outright, and assets upload
+one at a time with their own retries, so the step is idempotent and
+`gh run rerun <id> --failed` is the recovery from any partial failure. A
+re-run does preserve the version job's outputs. Creating unconditionally is
+what previously made a half-finished tag release unrecoverable: the retry died
+on `Release.tag_name already exists` before reaching the upload. It is bounded by artifact retention (7 days), not by the 30-day rerun
 limit. A rerun of only the publish job may not inherit the version job's
 outputs, so the step refuses to run on an empty version or sha rather than
 force-moving a tag to nothing.

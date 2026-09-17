@@ -364,17 +364,26 @@ jobs:
           }
 
           # The upload endpoint intermittently returns HTTP 500 on assets this
-          # size, which is what took a release offline once.
+          # size, which has taken a release offline once. Retry per asset, not
+          # per batch: one flaky tarball then re-sends only itself instead of
+          # pushing every asset back through the endpoint.
           upload() {
-            for attempt in 1 2 3; do
-              if gh release upload "$1" dist/* --clobber; then
-                return 0
-              fi
-              echo "::warning::upload attempt $attempt failed; retrying"
-              sleep 30
+            tag=$1
+            for f in dist/*; do
+              name=$(basename "$f")
+              for attempt in 1 2 3; do
+                if gh release upload "$tag" "$f" --clobber; then
+                  break
+                fi
+                if [ "$attempt" = 3 ]; then
+                  echo "::error::failed to upload $name after 3 attempts"
+                  return 1
+                fi
+                echo "::warning::upload of $name attempt $attempt failed; retrying"
+                sleep 30
+              done
             done
-            echo "::error::asset upload failed after 3 attempts"
-            return 1
+            return 0
           }
 
           notes="Rolling build of the latest \`main\` commit (\`$SHA\`). Unstable; superseded on every push. The running app reports \`$VERSION\` in its console pane and log file."
@@ -406,8 +415,13 @@ jobs:
               upload edge
             fi
           else
-            gh release create "v$VERSION" \
-              --title "v$VERSION" \
-              --generate-notes
+            # Create only if absent, so re-running after a failed upload does
+            # not trip "Release.tag_name already exists" and can get straight
+            # back to attaching the assets.
+            if ! gh release view "v$VERSION" >/dev/null 2>&1; then
+              gh release create "v$VERSION" \
+                --title "v$VERSION" \
+                --generate-notes
+            fi
             upload "v$VERSION"
           fi
