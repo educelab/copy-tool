@@ -1,8 +1,12 @@
 name: Test
 
+# Tags are included because the Build workflow reacts to this workflow's
+# conclusion. Without them a v* push would run no tests, fire no
+# workflow_run event, and silently publish nothing.
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
   workflow_dispatch:
 

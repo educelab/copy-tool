@@ -82,10 +82,67 @@ The PyInstaller specs bundle whatever `rclone` is on PATH at build time.
 source tree / system PATH. Anything new that loads an asset needs the same
 treatment, and the asset must be listed in all three spec files.
 
+### Versioning and release
+
+`copy_tool/_version.py` is the single source of truth. `pyproject.toml` reads
+it via `[tool.setuptools.dynamic] version = { attr = ... }` and `main()` passes
+it to `setApplicationVersion`, so there is exactly one place to bump. Keep the
+file to plain string literals: setuptools parses it with `ast` rather than
+importing the package, which is what keeps it dependency-free.
+
+CI rewrites that file before `pip install`, so a binary reports the commit it
+was built from. The version job in `build.yml` resolves the string:
+
+| Trigger | Version | Published as |
+| --- | --- | --- |
+| push to `main` | `1.3.0+edge.gabc12345` | rolling `edge` prerelease |
+| push of tag `v1.3.0` | `1.3.0` | release `v1.3.0` |
+| pull request | `1.3.0+dev.gabc12345` | nothing |
+
+The short hash is `g`-prefixed because PEP 440 treats an all-numeric local
+segment as a number and strips its leading zeros, which would silently corrupt
+a hash like `0012345`. `tests/test_version.py` guards this. The hash width is
+pinned with `--short=8` because `core.abbrev` is length-adaptive.
+
+To cut a release: bump `_version.py`, commit, then tag `v<same version>`. The
+version job fails the build if the tag and the file disagree.
+
+Release assets have constant filenames so the `releases/latest/download/...`
+and `releases/download/edge/...` URLs in the README stay valid. Renaming one
+breaks published links.
+
+### Build workflow wiring
+
+`build.yml` triggers on `workflow_run` from `Test`, so nothing publishes from a
+red commit. That trigger has sharp edges, all handled in the `version` job:
+
+- The workflow file always executes from the default branch, so changes to
+  `build.yml` cannot be tested in a PR. `pull_request` is a separate trigger
+  that builds (but never publishes) so PRs still exercise the build itself.
+- `github.ref` and `github.sha` point at the default branch, *not* at the
+  triggering commit. Every job checks out `needs.version.outputs.sha`, taken
+  from `workflow_run.head_sha`. Never use `github.sha` in this workflow.
+- `github.ref` cannot be used to detect a tag either. The channel comes from
+  `workflow_run.head_branch`, which carries the tag name on a tag push, and is
+  confirmed against a real ref before being trusted.
+- `test.yml` must keep its `tags: ["v*"]` trigger. Without it a tag push runs
+  no tests, fires no `workflow_run`, and publishes nothing, silently.
+- `workflow_run` also fires for PR and topic-branch test runs. Those set
+  `build=false` so the `pull_request` trigger does not build twice.
+
+`publish` needs all four build jobs, so a release never contains a mix of old
+and new platforms. Rolling `edge` is republished with
+`gh release delete edge --cleanup-tag`, because `gh` updates an existing
+release's assets but will not move its tag.
+
 ## Constraints
 
-- The version string is duplicated: `pyproject.toml` `version` and the
-  `setApplicationVersion` call in `main()`. Bump both.
+- The macOS job is pinned to `macos-26` (arm64), not `macos-latest`, for the
+  same reason the Ubuntu jobs run in containers: the deployment floor should
+  not drift with the runner image. There is no Intel Mac build.
+- Packages are unsigned on both macOS and Windows. Gatekeeper and SmartScreen
+  block them on first launch; the README documents the workaround. Adding
+  signing means an Apple Developer account plus notarization in the macOS job.
 - CI tests run on Python 3.9–3.13, but the legacy Ubuntu 20.04 build job
   installs the package on Python **3.8** with `--ignore-requires-python`.
   Shipped code must stay 3.8-compatible: use `typing.List`/`Dict`/`Union`
