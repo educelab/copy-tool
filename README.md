@@ -10,9 +10,9 @@ A GUI for copying data across filesystems using **rclone**.
    source venv/bin/activate
    ```
 
-2. Install the dependencies from the requirements file:
+2. Install the project and its dependencies:
    ```shell
-   python -m pip install -r requirements.txt
+   python -m pip install -e .
    ```
    
 3. **(Ubuntu only)** Install the PySide6 and pyinstaller system dependencies
@@ -29,7 +29,7 @@ A GUI for copying data across filesystems using **rclone**.
    
 ### Building a deployable app package
 
-1. Follow the [source installation](#Source) instructions
+1. Follow the [source installation](#source) instructions
 
 2. Run `pyinstaller`:
    ```shell
@@ -42,3 +42,18 @@ A GUI for copying data across filesystems using **rclone**.
    # Ubuntu
    pyinstaller copy_tool/copy_tool_Ubuntu.spec
    ```
+
+Packages for all supported platforms are also built by the
+[build workflow](.github/workflows/build.yml) on every push and are available
+as workflow artifacts.
+
+## Tests
+
+```shell
+python -m pip install -e .[test]
+pytest
+```
+
+Qt runs headless (`QT_QPA_PLATFORM=offscreen`, set in `tests/conftest.py`), so
+the GUI tests need no display. Tests that require PySide6 or pytest-qt skip
+themselves when those packages are missing.

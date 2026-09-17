@@ -1,0 +1,175 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+# Deploy builds. Every job produces a release-ready package and uploads it as a
+# workflow artifact; publishing to GitHub Packages is a later step and is
+# deliberately not wired up yet.
+
+jobs:
+  macos:
+    name: macOS
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # The spec files bundle whatever rclone is on PATH at build time.
+      - name: Install rclone
+        run: brew install rclone
+
+      - name: Build
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install .
+          pyinstaller copy_tool/copy_tool_macOS.spec
+
+      # Artifact uploads are zipped without POSIX permissions, which would
+      # strip the executable bit inside the .app bundle. Tar it first.
+      - name: Package
+        run: tar -czf CopyTool-macos.tar.gz -C dist CopyTool.app
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: copytool-macos
+          path: CopyTool-macos.tar.gz
+          retention-days: 7
+
+  windows:
+    name: Windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install rclone
+        run: |
+          Invoke-WebRequest -Uri 'https://downloads.rclone.org/rclone-current-windows-amd64.zip' -OutFile 'C:\rclone.zip'
+          Expand-Archive C:\rclone.zip C:\
+          Move-Item C:\rclone*\rclone.exe C:\Windows\
+
+      - name: Build
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install .
+          pyinstaller copy_tool/copy_tool_Windows.spec
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: copytool-windows
+          path: dist/CopyTool.exe
+          retention-days: 7
+
+  # Primary Ubuntu build, on 22.04 (jammy). PyInstaller links the build host's
+  # glibc, which is forward-compatible only, so a binary built on 22.04 (glibc
+  # 2.35) runs on 22.04 and newer and cannot run on anything older. Hosts older
+  # than that are served by the ubuntu-legacy job below. The build runs in a
+  # container rather than on a runner image so the glibc floor stays pinned.
+  ubuntu:
+    name: Ubuntu 22.04
+    runs-on: ubuntu-latest
+    container: ubuntu:22.04
+    env:
+      # Prevent apt (tzdata) from blocking on an interactive timezone prompt.
+      DEBIAN_FRONTEND: noninteractive
+      TZ: Etc/UTC
+    steps:
+      # git has to exist before checkout so the action clones instead of
+      # falling back to a tarball download.
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          apt-get install -y software-properties-common git curl unzip
+          add-apt-repository -y ppa:deadsnakes/ppa
+          apt-get update
+          apt-get install -y python3.12-dev python3.12-venv binutils libgl-dev libglib2.0-dev qt6-base-dev
+          curl https://rclone.org/install.sh | bash
+
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: |
+          python3.12 -m venv venv
+          . venv/bin/activate
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install .
+          pyinstaller copy_tool/copy_tool_Ubuntu.spec
+
+      # Tar preserves the executable bit that the artifact zip would drop.
+      - name: Package
+        run: tar -czf CopyTool-ubuntu-22.04.tar.gz -C dist CopyTool
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: copytool-ubuntu-22.04
+          path: CopyTool-ubuntu-22.04.tar.gz
+          retention-days: 7
+
+  # Legacy Linux build for hosts older than 22.04, down to 20.04 (focal). Unlike
+  # the other three build jobs this does NOT use Python 3.12: focal has no 3.12
+  # (deadsnakes dropped the series) and this artifact only has to *run* on an old
+  # box, so the build tracks the target and uses focal's stock Python 3.8.
+  #
+  # Retire this job once every target host is on 22.04+.
+  ubuntu-legacy:
+    name: Ubuntu 20.04 (legacy)
+    runs-on: ubuntu-latest
+    container: ubuntu:20.04
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      TZ: Etc/UTC
+    steps:
+      # libpython3.8 is the one PyInstaller actually needs -- it bundles the
+      # shared libpython. The libxcb-*/libxkbcommon set is what Qt's xcb platform
+      # plugin links against; PyInstaller has to import QtWidgets to trace it.
+      # libgtk-3-0 is for Qt's optional gtk3 platform theme (native file dialogs);
+      # it pulls gdk/pango/cairo/atk/gdk-pixbuf, so it is the only entry needed to
+      # resolve that plugin. Without it the build still works, and Qt falls back
+      # to its own dialogs.
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            python3.8 python3.8-venv python3.8-dev libpython3.8 \
+            binutils curl unzip ca-certificates git \
+            libgl1 libegl1 libglib2.0-0 libfontconfig1 libdbus-1-3 libgtk-3-0 \
+            libxkbcommon0 libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 \
+            libxcb-keysyms1 libxcb-image0 libxcb-render-util0 libxcb-shape0 \
+            libxcb-xinerama0 libxcb-randr0 libxcb-xkb1 libxcb-sync1 libxcb-xfixes0
+          curl https://rclone.org/install.sh | bash
+
+      - uses: actions/checkout@v4
+
+      # Deps first, honouring requires-python so pip picks the 3.8-compatible
+      # PySide6. Then the project alone with --no-deps, so --ignore-requires-python
+      # relaxes only the project's own floor and never leaks into dep resolution.
+      - name: Build
+        run: |
+          python3.8 -m venv venv
+          . venv/bin/activate
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install -r requirements-legacy.txt
+          python -m pip install --no-deps --ignore-requires-python .
+          pyinstaller copy_tool/copy_tool_Ubuntu.spec
+
+      # Same spec as the ubuntu job, so the binary lands at dist/CopyTool. The
+      # artifact name is what keeps the two builds apart.
+      - name: Package
+        run: tar -czf CopyTool-ubuntu-20.04-legacy.tar.gz -C dist CopyTool
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: copytool-ubuntu-20.04-legacy
+          path: CopyTool-ubuntu-20.04-legacy.tar.gz
+          retention-days: 7

@@ -1,6 +1,6 @@
 # Dependency set for the CopyTool "legacy" build -- the artifact for hosts older
 # than 22.04, built on focal's stock Python 3.8. Used directly by the
-# build:ubuntu-legacy CI job, not via a setup.cfg extra: that job installs the
+# ubuntu-legacy build job, not via a pyproject extra: that job installs the
 # project with --ignore-requires-python, and an extra would put that override on
 # dependency resolution too.
 bitmath

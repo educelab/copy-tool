@@ -1,0 +1,49 @@
+[build-system]
+requires = [
+    "setuptools>=61",
+    "wheel"
+]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "educelab-copytool"
+version = "1.3.0"
+description = "A GUI for copying data across filesystems using rclone"
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [
+    { name = "Seth Parker", email = "c.seth.parker@uky.edu" }
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: Other/Proprietary License",
+    "Operating System :: OS Independent",
+]
+dynamic = ["dependencies"]
+
+[project.urls]
+Homepage = "https://github.com/educelab/copy-tool"
+
+[project.optional-dependencies]
+test = [
+    "pytest",
+    "pytest-qt",
+]
+
+[project.gui-scripts]
+el_CopyTool = "copy_tool.main:main"
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }
+
+[tool.setuptools.packages.find]
+include = ["copy_tool*"]
+
+# The app icon is loaded relative to copy_tool/main.py, so it has to ship
+# with the package for the installed entry point.
+[tool.setuptools.package-data]
+copy_tool = ["assets/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

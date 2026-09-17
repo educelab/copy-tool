@@ -1,4 +1,4 @@
-"""Shared pytest configuration for the acquisition-workflow test suite.
+"""Shared pytest configuration for the CopyTool test suite.
 
 Forces Qt into headless ('offscreen') mode so GUI tests run without a display
 (e.g. in CI). This must happen before PySide6 is imported, so it lives here at
