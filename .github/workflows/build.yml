@@ -355,20 +355,51 @@ jobs:
           # A silently empty dist would publish a release with no binaries.
           [ -n "$(ls -A dist/)" ] || { echo "::error::no artifacts to publish"; exit 1; }
 
+          # The upload endpoint intermittently returns HTTP 500 on assets this
+          # size, which is what took a release offline once.
+          upload() {
+            for attempt in 1 2 3; do
+              if gh release upload "$1" dist/* --clobber; then
+                return 0
+              fi
+              echo "::warning::upload attempt $attempt failed; retrying"
+              sleep 30
+            done
+            echo "::error::asset upload failed after 3 attempts"
+            return 1
+          }
+
+          notes="Rolling build of the latest \`main\` commit (\`$SHA\`). Unstable; superseded on every push. The running app reports \`$VERSION\` in its console pane and log file."
+
           if [ "$CHANNEL" = edge ]; then
-            # gh updates an existing release's assets but will not move its
-            # tag, which would leave fresh binaries hanging off a stale commit.
-            # Deleting the tag with the release is what makes 'edge' roll.
-            gh release delete edge --cleanup-tag --yes || true
-            gh release create edge \
-              --prerelease \
-              --target "$SHA" \
-              --title "edge ($VERSION)" \
-              --notes "Rolling build of the latest \`main\` commit (\`$SHA\`). Unstable; superseded on every push. The running app reports \`$VERSION\` in its console pane and log file." \
-              dist/*
+            if gh release view edge >/dev/null 2>&1; then
+              # Binaries first, label second. If the upload fails, edge keeps
+              # its old tag and title rather than advertising a commit whose
+              # binaries never landed -- a silent mismatch is worse than a
+              # stale release. Updating in place rather than deleting is what
+              # keeps edge downloadable throughout.
+              upload edge
+              # target_commitish is documented as "unused if the Git tag
+              # already exists", so publishing alone would leave edge pinned to
+              # whichever commit created it. Force-moving the ref is the only
+              # thing that rolls the tag.
+              gh api -X PATCH "repos/$GH_REPO/git/refs/tags/edge" \
+                -f sha="$SHA" -F force=true >/dev/null
+              gh release edit edge \
+                --prerelease \
+                --title "edge ($VERSION)" \
+                --notes "$notes"
+            else
+              gh release create edge \
+                --prerelease \
+                --target "$SHA" \
+                --title "edge ($VERSION)" \
+                --notes "$notes"
+              upload edge
+            fi
           else
             gh release create "v$VERSION" \
               --title "v$VERSION" \
-              --generate-notes \
-              dist/*
+              --generate-notes
+            upload "v$VERSION"
           fi

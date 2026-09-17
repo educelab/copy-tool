@@ -131,9 +131,19 @@ red commit. That trigger has sharp edges, all handled in the `version` job:
   `build=false` so the `pull_request` trigger does not build twice.
 
 `publish` needs all four build jobs, so a release never contains a mix of old
-and new platforms. Rolling `edge` is republished with
-`gh release delete edge --cleanup-tag`, because `gh` updates an existing
-release's assets but will not move its tag.
+and new platforms.
+
+Rolling `edge` is updated in place, never deleted. `target_commitish` is
+documented as "unused if the Git tag already exists", so a republish has to
+force-move `refs/tags/edge` via the git refs API or `edge` stays pinned to the
+commit that first created it. Deleting the release instead would work, but a
+failed asset upload then leaves no `edge` at all; updating in place degrades to
+serving the previous commit's binaries. Uploads are retried because the upload
+endpoint intermittently returns HTTP 500 on assets this size.
+
+Order matters: assets upload *before* the tag moves and the title is rewritten.
+Relabelling first would leave a failed run advertising a commit whose binaries
+never landed, which is worse than a stale release.
 
 ## Constraints
 
