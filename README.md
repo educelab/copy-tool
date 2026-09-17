@@ -9,7 +9,7 @@ Prebuilt packages are published to
 
 | Platform | Latest release | Edge |
 | --- | --- | --- |
-| macOS (Apple Silicon) | [download](https://github.com/educelab/copy-tool/releases/latest/download/CopyTool-macos-arm64.tar.gz) | [download](https://github.com/educelab/copy-tool/releases/download/edge/CopyTool-macos-arm64.tar.gz) |
+| macOS (Apple Silicon) | [download](https://github.com/educelab/copy-tool/releases/latest/download/CopyTool-macos-arm64.dmg) | [download](https://github.com/educelab/copy-tool/releases/download/edge/CopyTool-macos-arm64.dmg) |
 | Windows | [download](https://github.com/educelab/copy-tool/releases/latest/download/CopyTool-windows.exe) | [download](https://github.com/educelab/copy-tool/releases/download/edge/CopyTool-windows.exe) |
 | Ubuntu 22.04+ | [download](https://github.com/educelab/copy-tool/releases/latest/download/CopyTool-ubuntu-22.04.tar.gz) | [download](https://github.com/educelab/copy-tool/releases/download/edge/CopyTool-ubuntu-22.04.tar.gz) |
 | Ubuntu 20.04 (legacy) | [download](https://github.com/educelab/copy-tool/releases/latest/download/CopyTool-ubuntu-20.04-legacy.tar.gz) | [download](https://github.com/educelab/copy-tool/releases/download/edge/CopyTool-ubuntu-20.04-legacy.tar.gz) |
@@ -38,8 +38,8 @@ contains.
 The packages are not code-signed, so both macOS and Windows will refuse to open
 them until you say otherwise. This is expected.
 
-On macOS, extract the archive and then clear the quarantine flag the browser
-set:
+On macOS, open the disk image, drag **CopyTool** onto the **Applications**
+alias, and then clear the quarantine flag the browser set:
 
 ```shell
 xattr -dr com.apple.quarantine /Applications/CopyTool.app

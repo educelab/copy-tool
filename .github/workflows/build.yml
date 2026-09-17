@@ -146,15 +146,22 @@ jobs:
           python -m pip install .
           pyinstaller copy_tool/copy_tool_macOS.spec
 
-      # Artifact uploads are zipped without POSIX permissions, which would
-      # strip the executable bit inside the .app bundle. Tar it first.
+      # A disk image is the conventional macOS format, and being a filesystem
+      # image it keeps the executable bit inside the .app that the artifact zip
+      # would otherwise strip. hdiutil is built in and needs no Finder session,
+      # unlike the prettier DMG tools.
       - name: Package
-        run: tar -czf CopyTool-macos-arm64.tar.gz -C dist CopyTool.app
+        run: |
+          mkdir -p dmg
+          cp -R dist/CopyTool.app dmg/
+          ln -s /Applications dmg/Applications
+          hdiutil create -volname CopyTool -srcfolder dmg -ov -format UDZO \
+            CopyTool-macos-arm64.dmg
 
       - uses: actions/upload-artifact@v7
         with:
           name: copytool-macos-arm64
-          path: CopyTool-macos-arm64.tar.gz
+          path: CopyTool-macos-arm64.dmg
           retention-days: 7
 
   windows:
