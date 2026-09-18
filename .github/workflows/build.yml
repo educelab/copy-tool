@@ -415,11 +415,19 @@ jobs:
               upload edge
             fi
           else
+            # A pre-release version must not take over 'latest', which the
+            # README's releases/latest/download/... links resolve against.
+            pre=()
+            if [[ "$VERSION" =~ (a|b|rc|\.dev)[0-9]+$ ]]; then
+              pre=(--prerelease)
+            fi
+
             # Create only if absent, so re-running after a failed upload does
             # not trip "Release.tag_name already exists" and can get straight
             # back to attaching the assets.
             if ! gh release view "v$VERSION" >/dev/null 2>&1; then
               gh release create "v$VERSION" \
+                "${pre[@]}" \
                 --title "v$VERSION" \
                 --generate-notes
             fi

@@ -104,8 +104,16 @@ segment as a number and strips its leading zeros, which would silently corrupt
 a hash like `0012345`. `tests/test_version.py` guards this. The hash width is
 pinned with `--short=8` because `core.abbrev` is length-adaptive.
 
+The tracked string may carry a pre-release or dev suffix (`1.4.0.dev0`) while
+work accumulates between releases. `tests/test_version.py` only requires it to
+be canonical PEP 440 with no local segment, since CI appends the local segment
+itself and a non-canonical spelling like `1.4.0dev0` would normalize on install
+into a version the file never names.
+
 To cut a release: bump `_version.py`, commit, then tag `v<same version>`. The
-version job fails the build if the tag and the file disagree.
+version job fails the build if the tag and the file disagree. A tag whose
+version is a pre-release or dev version publishes as a GitHub prerelease so it
+cannot take over `latest`.
 
 Release assets have constant filenames so the `releases/latest/download/...`
 and `releases/download/edge/...` URLs in the README stay valid. Renaming one
